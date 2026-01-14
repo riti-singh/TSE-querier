@@ -2,7 +2,7 @@
 
 # **querier DESIGN.md**
 
-*Riti Singh — CS50 Tiny Search Engine — Fall 2025*
+*Riti Singh - Fall 2025*
 
 ## **Overview**
 
