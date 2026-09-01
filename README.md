@@ -1,144 +1,111 @@
-# TSE-querier
+# Tiny Search Engine Querier
 
+This repository contains the query-processing component of a Dartmouth CS50 Tiny Search Engine (TSE) project. It implements ranked Boolean retrieval over crawler and indexer output; it is **not a standalone search engine repository**.
 
-**Riti Singh, Fall 2025**
-**Querier**
+## The search problem
 
-The **Querier** is the final component of the CS50 Tiny Search Engine (TSE).
-It reads:
+Given crawled pages and an inverted index, the querier accepts search terms, finds documents containing the requested term combinations, scores them, and prints matching URLs in ranked order. It does not crawl pages or construct an index.
 
-* the **page files** produced by the Crawler
-* the **index file** produced by the Indexer
+## Pipeline and inputs
 
-…then accepts user queries from **stdin**, evaluates them using the inverted index, and prints ranked search results.
-
-The Querier does **not** crawl or index anything itself — it performs **search** on already-prepared data.
-
----
-
-## **Usage**
-
-From the root of the TSE project:
-
-```bash
-./querier/querier pageDirectory indexFilename
+```mermaid
+flowchart LR
+    W[Web pages] --> C[Crawler]
+    C -->|numbered page files| P[pageDirectory]
+    P --> I[Indexer]
+    I -->|word to docID/count pairs| X[indexFilename]
+    Q[query on stdin] --> R[Querier]
+    P --> R
+    X --> R
+    R --> E[parse and validate]
+    E --> A[intersect AND sequences]
+    A --> O[union OR branches]
+    O --> S[rank by score]
+    S --> U[resolve docID to URL]
 ```
 
-Where:
+The executable requires:
 
-* `pageDirectory` is the directory created by the Crawler (containing numbered page files)
-* `indexFilename` is the index file written by the Indexer
+- `pageDirectory`: a crawler-produced directory with a `.crawler` marker and files named by positive document ID. The first line of each page file is its URL.
+- `indexFilename`: an indexer-produced serialized inverted index, conceptually mapping each normalized word to `docID → occurrence count` counters.
 
-Example:
+The external `common/index` module owns the index-file format. This repository neither defines nor generates it.
 
-```bash
-./querier/querier data/letters-1 letters.index
+## Query grammar
+
+Queries contain alphabetic words, whitespace, and the case-insensitive operators `and` and `or`. Input is normalized to lowercase. Any other character rejects the line.
+
+```text
+query       := andSequence { "or" andSequence }*
+andSequence := word { ["and"] word }*
 ```
 
-The program then prints:
+Adjacent words imply AND: `alpha beta` equals `alpha and beta`. AND binds more tightly than OR, so `alpha or beta gamma` means `alpha or (beta and gamma)`. Operators may not be first or last, and two operators may not be adjacent.
 
-```
-Query?
-```
+## Evaluation, scoring, and ranking
 
-You can type queries such as:
+For an AND sequence, the querier copies the first term's counters and intersects later terms. A document survives only when every term is present; its group score is the minimum term count:
 
-```
-dartmouth
-computer science
-planet and earth
-tse or project
+```text
+score(alpha and beta, doc) = min(count(alpha, doc), count(beta, doc))
 ```
 
-Queries continue until **EOF** (Ctrl-D).
+OR unions complete AND-sequence results by addition:
 
----
+```text
+score(groupA or groupB, doc) = score(groupA, doc) + score(groupB, doc)
+```
 
-## **Implementation**
+Positive results are sorted by descending score. The current comparator has no tie-breaker, so equal-scoring documents may appear in any order. Each document ID is resolved by opening `pageDirectory/<docID>` and reading its first line. An unreadable page file is displayed as `(no-url)`.
 
-The querier is implemented in `querier.c` and follows the CS50 TSE specifications:
+## Build requirements
 
-* **query parsing**: lowercasing, cleaning, splitting into words
-* **validation**: checks for syntax errors such as consecutive operators or illegal characters
-* **evaluation**:
+The makefile expects this directory to be the `querier/` child of a complete TSE tree with:
 
-  * `AND` groups are intersected using minimum document counts
-  * `OR` groups are unioned by summing their scores
-* **ranking**:
+- GCC or a compatible C11 compiler, POSIX interfaces, `make`, and Bash;
+- `../libcs50/libcs50.a` plus `counters.h` and `mem.h`;
+- `../common/common.a`, `index.h`, and the expected index implementation;
+- crawler data and a compatible indexer-produced index for runtime tests;
+- optionally Valgrind for `make valgrind`.
 
-  * non-zero results are collected
-  * sorted by descending document score
-* **output**:
+These course-provided dependencies and datasets are intentionally not copied here. They are absent in this checkout, so it cannot build independently.
 
-  * prints score, docID, and corresponding URL (first line of each page file)
-
-The querier uses:
-
-* `counters_t` for docID/count mappings
-* `index_t` for the global inverted index
-* helper functions such as `counters_intersect`, `counters_union`, and `rank_and_print`
-* the `pagedir` module to read the correct page file for each docID
-
-See `IMPLEMENTATION` for step-by-step details on logic and internal functions.
-
----
-
-## **Assumptions**
-
-* `pageDirectory` must contain files named with integer docIDs starting at 1 (created by Crawler).
-* The index file must be in the format produced by the TSE Indexer.
-* Words are normalized to lowercase alphabetic strings.
-* Logical operators supported:
-
-  * `and`
-  * `or`
-* The underlying index uses a hashtable of fixed slot size (200 by default).
-* Extremely large datasets may exceed normal memory limits, but standard CS50 test cases will not.
-
----
-
-## **Compilation**
-
-To build the entire Tiny Search Engine (all modules):
+In a compatible full TSE tree, the intended commands are:
 
 ```bash
 make
+./querier pageDirectory indexFilename
+make test
+make valgrind
 ```
 
-To clean object files:
+The current test script rebuilds the parent tree and uses course-specific fixture paths. See [CODE_AUDIT.md](CODE_AUDIT.md) before relying on these commands.
 
-```bash
-make clean
+## Testing approach
+
+`testing.sh` exercises argument-count errors, invalid paths, basic queries, redirected-input prompt suppression, illegal characters, and malformed operators. It does not assert exact document sets, scores, ordering, long-line behavior, memory safety, or index-load failures.
+
+A complete-tree verification should compile with strict warnings, run deterministic fixture-based result tests, cover implicit AND and precedence, exercise long input and failure paths, and use Valgrind or sanitizers.
+
+## Repository structure
+
+```text
+.
+├── querier.c          # parsing, evaluation, ranking, and URL lookup
+├── makefile           # full-tree-oriented build and test targets
+├── testing.sh         # Bash smoke tests
+├── DESIGN.md          # design contract
+├── IMPLEMENTATION.md  # source-level notes
+├── CODE_AUDIT.md      # correctness and dependency audit
+└── README.md          # case study and usage guide
 ```
 
-The querier binary will be created at:
+## Limitations
 
-```
-querier/querier
-```
-
-Run it normally as shown above.
-
----
-
-## **Testing**
-
-Basic testing:
-
-```bash
-./crawler/crawler http://cs50tse.cs.dartmouth.edu/tse/letters/index.html data/letters-1 1
-./indexer/indexer data/letters-1 letters.index
-./querier/querier data/letters-1 letters.index
-```
-
-
----
-
-## **Files**
-
-```
-querier/
-│── Makefile       — build rules for the querier
-│── querier.c      — full implementation
-│── README.md      — this file
-```
+- This checkout is not standalone and requires the API-compatible TSE `libcs50` and `common` modules.
+- It requires crawler page files and indexer output; it creates neither.
+- There are no phrases, parentheses, negation, stemming, or fielded searches.
+- A fixed 1024-byte input buffer causes an overlong physical line to be processed as multiple queries.
+- URLs longer than the fixed buffer can be silently truncated.
+- Equal scores have no deterministic tie-breaker.
+- Allocation, path truncation, integer overflow, index-load, and exit-status concerns remain unmodified because the dependencies needed to compile and test the C component are missing. See [CODE_AUDIT.md](CODE_AUDIT.md).

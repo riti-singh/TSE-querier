@@ -1,265 +1,38 @@
+# Querier design
 
+## Scope and interface
 
-# **querier DESIGN.md**
+The querier is the retrieval stage of Tiny Search Engine. It consumes, but does not create, a crawler page directory and an indexer-produced inverted index. It depends on external `libcs50` counters/memory APIs and the TSE `common/index` API.
 
-*Riti Singh - Fall 2025*
-
-## **Overview**
-
-The Querier is the third module of the Tiny Search Engine (TSE).
-Its job is to accept search queries from `stdin`, interpret them using the index produced by the Indexer, retrieve relevant documents, combine scores according to logical operators (“and”, “or”), rank results, and display them in a human-readable format.
-
-The Querier **never crawls** or **builds an index**; instead it:
-
-* loads an existing index file (via `index_load`)
-* reads page files stored in the pageDirectory
-* processes user commands until EOF
-* resolves the query into a ranked list of documents
-* prints results in a clean format
-
-The program stops when EOF or ctrl-D is received.
-
----
-
-## **Responsibilities**
-
-The Querier’s tasks can be grouped into five major responsibilities:
-
-1. **Input Validation**
-
-   * Validate command-line parameters (`pageDirectory`, `indexFilename`)
-   * Check that `pageDirectory` is a crawler-generated directory
-   * Confirm that the index file loads correctly
-
-2. **Query Parsing**
-
-   * Normalize input (lowercase, trim whitespace)
-   * Tokenize into words
-   * Validate syntax:
-
-     * no leading/trailing operators
-     * "and"/"or" only between words
-     * no repeated operators
-   * Produce an array of terms representing:
-
-     * AND sequences
-     * OR combinations of AND sequences
-
-3. **Query Evaluation**
-
-   * For each AND-sequence:
-
-     * intersect counters of each word
-     * score = sum of minimum word counts per document
-   * For OR-combinations:
-
-     * union all AND-sequence results
-     * score = sum of sub-results
-
-4. **Ranking**
-
-   * Collect all non-zero document scores
-   * Convert to array of structs for sorting
-   * Sort in decreasing score order
-
-5. **Output Formatting**
-
-   * Print “Query:” followed by normalized query
-   * Print number of documents returned
-   * For each result, print:
-
-     ```
-     score docID URL
-     ```
-   * If no documents match, print “No results found.”
-
----
-
-## **Data Structures**
-
-### **1. counters_t (from libcs50)**
-
-Used for mapping:
-
-```
-docID → count
+```text
+./querier pageDirectory indexFilename
 ```
 
-The Querier uses counters to:
+`pageDirectory` must contain `.crawler`; `indexFilename` must be readable by the external index module. Queries are read from standard input until EOF. `Query?` appears only for terminal input.
 
-* represent counts for each word
-* compute AND (intersection) results
-* compute OR (union) results
+## Query contract
 
-### **2. index_t**
+Input is lowercased and split at whitespace. Only alphabetic characters and whitespace are accepted.
 
-The inverted index loaded from the indexer:
-
-```
-word → counters(docID → count)
+```text
+query       := andSequence { "or" andSequence }*
+andSequence := word { ["and"] word }*
 ```
 
-Querier never edits it; it only queries it.
+Adjacent words are implicit AND, and AND has precedence over OR. An operator cannot be first or last, operators cannot be adjacent, and blank lines are ignored.
 
-### **3. AND-sequence accumulator**
+## Evaluation model
 
-For each sequence separated by “or”, the Querier builds a temporary counters_t representing:
+The index maps a word to `counters_t`, conceptually `docID → term frequency`. Each AND sequence copies the first term's counters and intersects subsequent terms, retaining the minimum count per document. A missing term makes every accumulated score zero. OR-separated group results are unioned by adding scores for matching document IDs.
 
-```
-docID → score for that AND block
-```
+## Ranking and output
 
-Often created by copying the first word’s counters, then intersecting with others.
+Positive scores are collected into a `docscore_t` array and sorted descending with `qsort`. There is no tie-break rule. For each result, `pageDirectory/<docID>` is opened and its first line is used as the URL; failure produces `(no-url)`.
 
-### **4. Query evaluation helpers**
+Output contains a normalized `Query:` line followed by a ranked list or `No documents match.`, then a separator.
 
-#### **two_counters (optional helper struct)**
+## Ownership, cleanup, and errors
 
-If used, this structure allows two counters to be passed into a single callback:
+Token pointers refer into the current stack input buffer; only their pointer array is allocated. Evaluation counters and the ranking array are temporary. The index is owned by `main` until EOF. `get_url` returns an allocated caller-owned string.
 
-```c
-typedef struct two_counters {
-    counters_t* c1;
-    counters_t* c2;
-} two_counters_t;
-```
-
-Useful for implementing:
-
-* intersection
-* union
-
-#### **doc_t**
-
-A document-score pair:
-
-```c
-typedef struct doc {
-    int docID;
-    int score;
-} doc_t;
-```
-
-#### **all_docs**
-
-A dynamic array of doc_t pointers, plus count:
-
-```c
-typedef struct all_docs {
-    doc_t** docs;
-    int ndocs;
-} all_docs_t;
-```
-
-Used for sorting and printing results.
-
----
-
-## **Functional Breakdown**
-
-### **Main Workflow (`main`)**
-
-1. Validate arguments
-2. Load index file
-3. Repeatedly prompt for a query
-4. Process the query
-5. Rank and print results
-6. Cleanup and exit
-
-### **Query Handling**
-
-* `prompt()`
-  Displays prompt only if input is from a terminal (`isatty()`).
-  Reads line from stdin.
-
-* `parse_query()`
-  Tokenizes the line, validates logic, and returns an array of normalized words.
-
-* `evaluate_query()`
-  Implements Boolean logic:
-
-  * break query into AND-blocks
-  * evaluate each block
-  * union all block results
-
-* `evaluate_andsequence()`
-  Performs the intersection across all words in an AND-block.
-
----
-
-## **Intersection / Union Helper Logic**
-
-### **Intersection (AND)**
-
-For each docID:
-
-```
-score(docID) = min(counts for all words)
-```
-
-Implemented via:
-
-* copy first counters
-* for each next word:
-
-  * intersect into result using callbacks
-
-### **Union (OR)**
-
-For each docID:
-
-```
-score(docID) = sum(scores from all AND-blocks)
-```
-
----
-
-## **Ranking and Printing**
-
-The final counters_t from OR-combination:
-
-* collect all non-zero entries
-* convert to an array of doc_t
-* sort descending by score (tiebreak by docID ascending)
-* retrieve URL of each docID via pageDirectory
-
-Print format:
-
-```
-Score: X  DocID: Y  URL: Z
-```
-
----
-
-## **External Modules Used**
-
-* **libcs50**
-
-  * `counters`
-  * `hashtable`
-  * `memory`
-
-* **common**
-
-  * `pagedir` (validate directories and fetch URLs)
-  * `index` (load index)
-
----
-
-## **Assumptions**
-
-* The index file is well-formed (created by Indexer).
-* The pageDirectory contains crawler-style files:
-
-  * one file per docID
-  * first line: URL
-  * second line: depth
-* Query operators are only:
-
-  * `and`
-  * `or`
-* Words are alphabetic only after normalization.
-* Upper/lowercase irrelevant; all is converted to lowercase.
-* Index contains all possible words referenced by users.
-
----
+Argument and major allocation failures exit nonzero. Malformed queries are nonfatal. The current implementation reports a nonzero `index_load` result but continues and ultimately returns success. Other robustness gaps are listed in [CODE_AUDIT.md](CODE_AUDIT.md).
