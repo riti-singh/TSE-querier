@@ -1,0 +1,24 @@
+# Local build products
+querier
+*.o
+*.a
+*.d
+
+# Test, sanitizer, and profiling output
+*.out
+*.log
+*.gcda
+*.gcno
+*.gcov
+*.profraw
+*.profdata
+core
+core.*
+
+# Generated indexes and local metadata
+*.index
+*.idx
+.DS_Store
+Thumbs.db
+*.swp
+*~
